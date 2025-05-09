@@ -61,37 +61,42 @@ def init_browser(headless=True, cookie_value=None):
 
 def save_date_to_text(date, text_file_path):
     print(f"Saving date {date} to text file...")
-    seen_dates = set()
-    if os.path.exists(text_file_path):
-        with open(text_file_path, 'r') as file:
-            seen_dates.update(file.read().splitlines())
     formatted_date = date.replace('-', '/')
-    if formatted_date not in seen_dates:
-        with open(text_file_path, 'a') as file:
-            file.write(formatted_date + '\n')
+    with open(text_file_path, 'a') as file:
+        file.write(formatted_date + '\n')
 
 @retry(retry_on_exception=retry_if_exception, stop_max_attempt_number=3, wait_fixed=2000)
-def find_incomplete_puzzles(driver, text_file_path, months):
-    print("Searching for incomplete puzzles...")
-    driver.get("https://www.nytimes.com/crosswords/archive")
+def find_incomplete_puzzles(driver, text_file_path, start_date, end_date):
+    # Clear the file first before writing dates to it. 
+    with open(text_file_path, 'r+') as file:
+        file.truncate(0)
+    month_urls_to_check = []
+    start_month, year = start_date.split("/")
+    start_month = int(start_month)
+    end_month = int(end_date.split("/")[0])
+
+    for i in range(end_month - start_month + 1):
+        month = start_month + i
+        month_urls_to_check.append(f"{year}/{month}")
+
+    driver.get("https://www.nytimes.com/crosswords/archive/mini")
     WebDriverWait(driver, 5).until(
         EC.visibility_of_element_located((By.CSS_SELECTOR, ".calendar")))
     back_button_selector = ".archive_prev"
-    for _ in range(months):
+    for month_url in month_urls_to_check:
         try:
+            print(f'Searching for completed puzzles for {month_url}...')
+            driver.get(f"https://www.nytimes.com/crosswords/archive/mini/{month_url}")
+            WebDriverWait(driver, 5).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, ".calendar")))
             WebDriverWait(driver, 2).until(
                 EC.visibility_of_all_elements_located((By.CSS_SELECTOR, ".puzzleInfo")))
-            incomplete_puzzles = driver.find_elements(By.XPATH, "//a[.//span[text()='Resume']]")
+            WebDriverWait(driver, 3).until(EC.visibility_of_element_located((By.XPATH, "//a[.//span[text()='Review']]")))
+            incomplete_puzzles = driver.find_elements(By.XPATH, "//a[.//span[text()='Review']]")
             for puzzle in incomplete_puzzles:
                 href = puzzle.get_attribute("href")
                 puzzle_date = "-".join(href.split("/")[-3:])
                 save_date_to_text(puzzle_date, text_file_path)
-            print("Moving to the previous month...")
-            if driver.find_elements(By.CSS_SELECTOR, back_button_selector):
-                time.sleep(2)
-                driver.find_element(By.CSS_SELECTOR, back_button_selector).click()
-                WebDriverWait(driver, 30).until(EC.visibility_of_element_located(
-                    (By.CSS_SELECTOR, back_button_selector)))
         except Exception as e:
             print(f"Error while gathering incomplete puzzles: {e}")
             break
@@ -99,18 +104,12 @@ def find_incomplete_puzzles(driver, text_file_path, months):
 @retry(retry_on_exception=retry_if_exception, stop_max_attempt_number=3, wait_fixed=2000)
 def clear_puzzle_for_date(driver, date):
     print(f"Clearing puzzle for date: {date}...")
-    puzzle_url = f"https://www.nytimes.com/crosswords/game/daily/{date}"
+    puzzle_url = f"https://www.nytimes.com/crosswords/game/mini/{date}"
     driver.get(puzzle_url)
     WebDriverWait(driver, 10).until(
         EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Play']"))).click()
     WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='clear']"))).click()
-    time.sleep(2)
-    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-        (By.XPATH, "//button[contains(text(), 'Puzzle & Timer')]"))).click()
-    time.sleep(2)
-    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-        (By.XPATH, "//button[@aria-label='Start over']"))).click()
+        EC.element_to_be_clickable((By.XPATH, "//button[@aria-label='Reset']"))).click()
     print("Puzzle cleared.")
 
 def clear_puzzles_from_text(driver, text_file_path):
@@ -127,13 +126,13 @@ def clear_puzzles_from_text(driver, text_file_path):
             print(f"Error clearing puzzle for {date}: {e}")
 
 
-def main(cookie_value, headless, months, mode):
+def main(cookie_value, headless, start_date, end_date, mode):
     print("Script started. Preparing to clear NYT Crossword puzzles...")
     text_file_path = "incomplete_puzzles.txt"
     driver = init_browser(headless, cookie_value)
 
     if mode in ["scan", "both"]:
-        find_incomplete_puzzles(driver, text_file_path, months)
+        find_incomplete_puzzles(driver, text_file_path, start_date, end_date)
     if mode in ["fix", "both"]:
         clear_puzzles_from_text(driver, text_file_path)
 
@@ -146,7 +145,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="NYTimes Crossword Puzzle Automation")
     parser.add_argument('--headless', nargs='?', const=True, default=None, help="Run browser in headless mode (yes/no).")
-    parser.add_argument('--months', type=int, default=None, help="Number of months to go back for puzzles. Required if mode is 'scan' or 'both'.")
+    parser.add_argument('--start_date', type=str, default=None, help="Start date. Format must be MM/YYYY. The end and start date have to be in the same year.")
+    parser.add_argument('--end_date', type=str, default=None, help="End date. Format must be MM/YYYY. The end and start date have to be in the same year.")
     parser.add_argument('--mode', choices=['scan', 'fix', 'both'], default=None, help="Operation mode: scan for incomplete puzzles, fix incomplete puzzles, or both.")
     args = parser.parse_args()
 
@@ -161,15 +161,6 @@ if __name__ == "__main__":
             print("Invalid mode. Please choose from 'scan', 'fix', or 'both'.")
             args.mode = input("Enter operation mode (scan, fix, both): ").strip().lower()
 
-    if args.mode in ['scan', 'both'] and args.months is None:
-        while True:
-            months_input = input("Enter the number of months to go back for puzzles: ").strip()
-            try:
-                args.months = int(months_input)
-                break
-            except ValueError:
-                print("Please enter a valid integer for the number of months.")
-
     cookie_value = credentials.get('cookie')
     username = credentials.get('username')
     password = credentials.get('password')
@@ -178,4 +169,4 @@ if __name__ == "__main__":
         auth_cookie = get_auth_cookie(username, password)
         cookie_value = auth_cookie['value']
 
-    main(cookie_value, args.headless, args.months, args.mode)
+    main(cookie_value, args.headless, args.start_date, args.end_date, args.mode)
